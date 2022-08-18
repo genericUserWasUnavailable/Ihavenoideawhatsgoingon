@@ -1,0 +1,484 @@
+uint SystemStatus; // 0 = shutdown, 1 = seek, 2 = actively firing
+        uint counting;                                                  // integer counting and resetting to show the script is running and functioning
+        uint aimlocked;                                                 // integer counting up if gun is locked, but not firing, to change its targetting group
+        uint shutdown;                                                  // integer counting up if nothing is targetted to shutdown the PB (will be reset from CTC upon acquiring a target)
+        uint release; // count before releasing locks.
+        float AzimuthPiston; // Azimuth control of piston main value.
+        const double RayCMax = (double)2000;
+        //      const float UpperLimitRotor = 361f; // global value for upper limit, to be used with rotors.
+        //      const float LowerLimitRotor = -361f; // global value for lower limit, to be used with rotors.
+        //      const float UpperLimitPiston = 10f; // global value for upper limit, to be used with piston. DEBUG
+        //      const float LowerLimitPiston = 0f; // global value for lower limit, to be used with piston. DEBUG
+        const float GunPivotPistonStop = 0f; // PISTON STOPPING
+                                             //        const float UpperLimitHinge = 90f; // global value for upper limit, to be used with hinges.
+                                             //        const float LowerLimitHinge = -90f; // global value for lower limit, to be used with hinges.
+        bool AimTrue; // goes true if the CTC acquires a target AND is aimed at said target
+        bool HasTarget; // goes true if CTC has a target
+        bool IsUnderControl; // true if CTC is being player controlled
+        bool IsShooting; // true if weapons are actively firing        
+        bool Alarm1; // true if alarm 1 is selected.
+        bool GunsGO; // 'safety'
+        bool TargetFound;
+        readonly Color turretstatus_seeking = new Color(120, 120, 0); // colour change for weapon status
+        readonly Color turretstatus_engaged = new Color(200, 0, 0); // same
+        readonly Color turretstatus_offline = new Color(0, 0, 0); // same
+        /*
+        --------------------------------
+         NAMING OF BLOCKS GOES BELOW !!!!!!!!!!!!
+        -------------------------------
+        */
+        const string MGcam = "Camera_test_ToLCD"; // Turret's camera. Disable if not using camera!
+        const string GunCtrlsController = "MassiveTurret_Control Seat"; // Grid Main Cockpit if any
+        const string Azi = "MassiveTurret_Azimuth_Rotor"; // Azimuth controls block name setting
+        const string Ele = "GunPivotPiston"; // Elevation controls block name setting
+        const string EleHinge = "MassiveTurret_Pivot_Hinge"; // hinge for massive ordnance pivot
+        const string ctc = "CTC_MassiveTurret_CtrlStation"; // CTC controls block name setting
+        const string asb = "MassiveTurret_Alarm_Sound"; // Noisy-makey cally-whally.
+        const string testrig = "TestRig_"; // Beginning of block's CustomName. 
+        const string pistonLeft = "AzimuthPiston_Left";
+        const string pistonRight = "AzimuthPiston_Right";
+        string TarID = ""; // targetted grid's ID (Usually just type)
+        string TarID_relat = ""; // relationship with targetted entity (hopefully hostile)        
+                                 //        string UniqueTarget = ""; // DEBUG TARGETING GROUP
+        string TarGroupsGet = ""; // DEBUG TARGETING GROUP
+        IMyCameraBlock MGCam;
+        IMyCockpit Ctrl;
+        IMyPistonBase GunPivotPiston;
+        IMyMotorStator GunAzimuthRotor;
+        IMyMotorStator GunPivotHinge;
+        IMyTurretControlBlock CTC;
+        IMySoundBlock ASB;
+        IMyPistonBase PistonLeft;
+        IMyPistonBase PistonRight;
+        List<IMyGyro> GSM = new List<IMyGyro>(); // multiple gyros for stabilization.
+        List<IMyLightingBlock> TurretLights = new List<IMyLightingBlock>(); // Lights for weapon-status.        
+        List<IMyUserControllableGun> Artillery = new List<IMyUserControllableGun>(); // Artillery weapons.        
+                                                                                     //        List<IMyLandingGear> MagLocks = new List<IMyLandingGear>(); // Mag-locks. CURRENTLY DISABLED BECAUSE CAUSING ERRORS
+        List<IMyTextPanel> _KillTrack = new List<IMyTextPanel>(); // Kill track screens.
+        public Program()
+        {
+            FetchGTS();
+        }
+        void FetchGTS() // Collects all blocks required for the script.
+        {
+            MGCam = GridTerminalSystem.GetBlockWithName(MGcam) as IMyCameraBlock;
+            Ctrl = GridTerminalSystem.GetBlockWithName(GunCtrlsController) as IMyCockpit;
+            GunPivotPiston = GridTerminalSystem.GetBlockWithName(Ele) as IMyPistonBase;
+            GunAzimuthRotor = GridTerminalSystem.GetBlockWithName(Azi) as IMyMotorStator;
+            GunPivotHinge = GridTerminalSystem.GetBlockWithName(EleHinge) as IMyMotorStator;
+            CTC = GridTerminalSystem.GetBlockWithName(ctc) as IMyTurretControlBlock;
+            ASB = GridTerminalSystem.GetBlockWithName(asb) as IMySoundBlock;
+            PistonLeft = GridTerminalSystem.GetBlockWithName(pistonLeft) as IMyPistonBase;
+            PistonRight = GridTerminalSystem.GetBlockWithName(pistonRight) as IMyPistonBase;
+            /*
+            -------------------------------------------
+            WEAPONS AND LIGHTS BUNDLES FOR TURRET; BE SPECIFIC WHEN NAMING  !!!!!!!!!           
+            -------------------------------------------
+            */
+            GridTerminalSystem.GetBlocksOfType(GSM, gsm => gsm.CustomName.StartsWith(testrig));
+            GridTerminalSystem.GetBlocksOfType(Artillery, Gun => Gun.CustomName.StartsWith(testrig));
+            GridTerminalSystem.GetBlocksOfType(TurretLights, turLig => turLig.CustomName.StartsWith(testrig));
+            //            GridTerminalSystem.GetBlocksOfType(MagLocks, mAgloc => mAgloc.CustomName.StartsWith(testrig)); ERROR IN CODE SOMEHOW - DISABLED!!!!
+            GridTerminalSystem.GetBlocksOfType(_KillTrack, KT => KT.CustomName.EndsWith("_KillTrack"));
+        }
+        void WakeUp() // Response to being targeted.  TARGETING GROUPS ARE: Weapons; Propulsion, PowerSystems, Default <===================== TARGETING GROUP OPTIONS
+        {
+
+            if (SystemStatus == 1)
+            {
+                CTC.SetTargetingGroup("Weapons");
+            }
+            else
+            {
+                CTC.SetTargetingGroup("PowerSystems");
+                SystemStatus = 1;
+            }
+            string MeSurface = Me.GetSurface(0).ToString();
+            if (!MeSurface.EndsWith("Hostiles\nEngaged"))
+            {
+                Me.GetSurface(0).WriteText("Hostiles\nEngaged");
+            }
+            release = 0;
+            counting = 0;
+            shutdown = 0;
+            aimlocked = 0;
+            ASB.SelectedSound = "AI_warning louder";
+            ASB.Play();
+            if (HasTarget)
+            {
+                TarGroupsGet = CTC.GetTargetingGroup();
+            }
+            foreach (IMyTextPanel killtrackers in _KillTrack)
+            {
+                float RoundedPivot = (float)Math.Round(GunPivotPiston.CurrentPosition, 2);
+                float RoundedAzi = (float)Math.Round(GunAzimuthRotor.Angle, 2);
+                killtrackers.WriteText($"Gun Position:\nEle: {RoundedPivot}\nAzi: {RoundedAzi}");
+            }
+            UnlockTurret();
+        }
+        void UnlockTurret() // method for unlocking azimuth+elevation hinges/rotors
+        {
+            CTC.AngleDeviation = .8f;
+            GunPivotHinge.Enabled = true;
+            GunAzimuthRotor.Enabled = true;
+            GunPivotPiston.Enabled = true;
+            PistonLeft.Enabled = true;
+            PistonRight.Enabled = true;
+            release = 0;
+            foreach (IMyUserControllableGun Artillery in Artillery)
+            {
+                Artillery.Shoot = false;
+            }
+            foreach (IMyGyro gsm in GSM)
+            {
+                gsm.Enabled = false;
+                gsm.GyroOverride = false;
+            }
+            if (!Alarm1 && SystemStatus != 0)
+            {
+                ASB.SelectedSound = "Alert 1";
+                ASB.Play();
+            }
+        }
+        void LockTurret() // method for locking azimuth+elevation hinges/rotors
+        {
+            if (!GunsGO)
+            {
+                GunAzimuthRotor.Enabled = false;
+                GunPivotHinge.Enabled = false;
+                GunPivotPiston.Velocity = GunPivotPistonStop;
+                PistonLeft.Velocity = GunPivotPistonStop;
+                PistonLeft.Enabled = false;
+                PistonRight.Enabled = false;
+                foreach (IMyGyro gsm in GSM)
+                {
+                    gsm.Enabled = true;
+                    gsm.GyroOverride = true;
+                }
+            }
+            else
+            {
+                TargetAcquired();
+            }
+        }
+        public void TargetAcquired() // Initiation of weaponry.
+        {
+            release = 0;
+            foreach (IMyUserControllableGun Artillery in Artillery)
+            {
+                Artillery.Shoot = true;
+            }
+            if (Alarm1)
+            {
+                ASB.SelectedSound = "Alert 2";
+                ASB.Play();
+            }
+        }
+        void PistonUpdateElevation()
+        {
+            if (GunPivotHinge.TargetVelocityRPM < 0f)
+            {
+                if (GunPivotPiston.Velocity < 0)
+                {
+                    GunPivotPiston.Velocity = 0f;
+                    GunPivotPiston.Enabled = true;
+                }
+                else
+                {
+                    GunPivotPiston.Velocity += 0.015f;
+                }
+            }
+            else if (GunPivotHinge.TargetVelocityRPM > 0f)
+            {
+                if (GunPivotPiston.Velocity > 0)
+                {
+                    GunPivotPiston.Velocity = 0f;
+                    GunPivotPiston.Enabled = true;
+                }
+                else
+                {
+                    GunPivotPiston.Velocity += -0.015f;
+                }
+            }
+            else
+            {
+                GunPivotPiston.Velocity = GunPivotPistonStop;
+            }
+        }
+        void PistonUpdateAzimuth()
+        {
+            if (GunAzimuthRotor.TargetVelocityRPM > 0f)
+            {
+                if (PistonLeft.Velocity < 0f)
+                {
+                    PistonLeft.Velocity = 0f;
+                }
+                else
+                {
+                    PistonLeft.Velocity += 0.01f;
+                }
+            }
+            else if (GunAzimuthRotor.TargetVelocityRPM < 0f)
+            {
+                if (PistonLeft.Velocity > 0f)
+                {
+                    PistonLeft.Velocity = 0f;
+                }
+                else
+                {
+                    PistonLeft.Velocity -= 0.01f;
+                }
+            }
+            else
+            {
+                PistonLeft.Velocity = GunPivotPistonStop;
+            }
+            AzimuthPiston = PistonLeft.Velocity;
+            PistonRight.Velocity = AzimuthPiston * -1;
+        }
+        void CycleTargetingGroups()
+        {
+            if (CTC.GetTargetingGroup().Contains("ault"))
+            {
+                CTC.ApplyAction("TargetingGroup_CycleSubsystems");
+            }
+            else
+            {
+                if (IsUnderControl || (AimTrue && !IsShooting))
+                {
+                    AimTrueLock();
+                }
+                else
+                {
+                    CTC.ApplyAction("TargetingGroup_CycleSubsystems");
+                    aimlocked = 0;
+                }
+            }
+        }
+        void AimTrueLock() //  CTC.GetTargetedEntity().Relationship.ToString();
+        {
+            if (!MGCam.EnableRaycast)
+            {
+                MGCam.EnableRaycast = true;
+            }
+            else
+            {
+                if (MGCam.AvailableScanRange > 1999)
+                {
+                    TargetFound = MGCam.Raycast(RayCMax).Relationship.ToString().Contains("ostile") || MGCam.Raycast(RayCMax).Relationship.ToString().Contains("nemie");
+                    if (TargetFound)
+                    {
+                        TargetAcquired();
+                    }
+                }
+                else
+                {
+                    MGCam.char
+                }
+            }
+        }
+        public void Main(string argument, UpdateType updateSource)
+        {
+            Runtime.UpdateFrequency = HasTarget || IsUnderControl ? UpdateFrequency.Update10 : SystemStatus > 0 ? UpdateFrequency.Update100 : UpdateFrequency.Once;            
+            Alarm1 = ASB.SelectedSound == "Alert 1";            
+            if (argument.Contains('1'))
+            {
+                Me.GetSurface(0).WriteText($"{(HasTarget ? $"Hostiles\nEngaged:\n{TarID}\n{(IsShooting ? "Weapons GO!" : "Locking\non target")}" : "")}");
+                shutdown = 0;
+                release = 0;
+                AimTrue = true;
+                Echo($"Hostiles Engaged: \n{TarID}");
+                LockTurret();
+                if (SystemStatus != 2 && (AimTrue || IsUnderControl))
+                {
+                    SystemStatus++;
+                }
+                else
+                {
+                    SystemStatus = 1;
+                }
+                foreach (IMyLightingBlock lights in TurretLights)
+                {
+                    lights.Color = IsShooting ? turretstatus_engaged : HasTarget ? turretstatus_seeking : turretstatus_offline;
+                }
+            }
+            if (argument == "0")
+            {
+                if (IsUnderControl || !AimTrue)
+                {
+                    UnlockTurret();
+                    PistonUpdateAzimuth();
+                    PistonUpdateElevation();
+                    SystemStatus = 1;
+                }
+                foreach (IMyLightingBlock lights in TurretLights)
+                {
+                    lights.Color = IsShooting ? turretstatus_engaged : HasTarget ? turretstatus_seeking : turretstatus_offline;
+                }
+            }
+            if (argument.Contains("bat"))
+            {
+                WakeUp();
+                PistonUpdateAzimuth();
+                PistonUpdateElevation();
+                foreach (IMyLightingBlock lights in TurretLights)
+                {
+                    lights.Color = IsShooting ? turretstatus_engaged : HasTarget ? turretstatus_seeking : turretstatus_offline;
+                }
+            }
+            if (SystemStatus > 0)
+            {
+                if (HasTarget && AimTrue || SystemStatus > 1)
+                {
+                    if (!GunsGO)
+                    {
+                        LockTurret();
+                        Echo($"{(HasTarget ? $"Hostiles Engaged: {TarID}" : "")}\n{(HasTarget ? $"{TarID_relat}" : "")}\n");
+                        foreach (IMyLightingBlock lights in TurretLights)
+                        {
+                            lights.Color = IsShooting ? turretstatus_engaged : HasTarget ? turretstatus_seeking : turretstatus_offline;
+                        }
+                    }
+                    else
+                    {
+                        TargetAcquired();
+                        foreach (IMyLightingBlock lights in TurretLights)
+                        {
+                            lights.Color = IsShooting ? turretstatus_engaged : HasTarget ? turretstatus_seeking : turretstatus_offline;
+                        }
+                    }
+                }
+                else if (HasTarget && AimTrue && SystemStatus != 2)
+                {
+                    SystemStatus++;
+                }
+                if (SystemStatus >= 1)
+                {
+                    if (aimlocked > 25)
+                    {
+                        AimTrue = false;
+                        UnlockTurret();
+                        foreach (IMyLightingBlock lights in TurretLights)
+                        {
+                            lights.Color = IsShooting ? turretstatus_engaged : HasTarget ? turretstatus_seeking : turretstatus_offline;
+                        }
+                    }
+                    if (!HasTarget && !IsUnderControl)
+                    {
+                        if (SystemStatus == 2)
+                        {
+                            SystemStatus--;
+                        }
+                        foreach (IMyLightingBlock lights in TurretLights)
+                        {
+                            lights.Color = IsShooting ? turretstatus_engaged : HasTarget ? turretstatus_seeking : turretstatus_offline;
+                        }
+                    }
+                }
+                if (!HasTarget && !IsUnderControl)
+                {
+                    shutdown++;
+                    if (shutdown > 7)
+                    {
+                        SystemStatus = 0;
+                    }
+                }
+                if (counting > 19)
+                {
+                    counting = 0;
+                }
+                IsUnderControl = CTC.IsUnderControl;
+                HasTarget = CTC.HasTarget;
+                if (HasTarget)
+                {
+                    TarID = CTC.GetTargetedEntity().Name;
+                    TarID_relat = CTC.GetTargetedEntity().Relationship.ToString();
+                }
+                IsShooting = Artillery.Any(x => x.IsShooting);
+                if (!AimTrue && !IsUnderControl)
+                {
+                    foreach (IMyUserControllableGun Artillery in Artillery)
+                    {
+                        Artillery.Shoot = false;
+                    }
+                    PistonUpdateAzimuth();
+                    PistonUpdateElevation();
+                }
+                if (!IsShooting && GunsGO)
+                {
+                    aimlocked++;
+                }
+                if (IsShooting && (AimTrue || IsUnderControl))
+                {
+                    aimlocked = 0;
+                    release = 0;
+                }
+                if (HasTarget || IsUnderControl)
+                {
+                    Echo($"{TarID}");
+                    shutdown = 0;
+                    if (SystemStatus == 0)
+                    {
+                        SystemStatus = 1;
+                    }
+                }
+                if (AimTrue && GunsGO && !IsShooting && !IsUnderControl)
+                {
+                    if ((aimlocked > 19 && Runtime.UpdateFrequency == UpdateFrequency.Update10) || (
+                        aimlocked > 4 && Runtime.UpdateFrequency == UpdateFrequency.Update100))
+                    {
+                        CycleTargetingGroups();
+                    }
+                }
+                PistonUpdateElevation();
+                PistonUpdateAzimuth();
+                GunsGO = (!GunAzimuthRotor.Enabled && !GunPivotHinge.Enabled && (SystemStatus >= 1 || CTC.IsAimed));
+                Echo(counting < 5 ? "." : counting < 10 ? ".." : "...");
+                Echo(IsUnderControl ? "" : HasTarget ? "" : "shutdown at 10: " + $"{shutdown}");
+                Echo(IsUnderControl ? "" : $"Subsystem refresh at {(Runtime.UpdateFrequency == UpdateFrequency.Update1 ? "240" : "20")}+: {aimlocked}");
+                Echo(IsUnderControl ? "" : HasTarget ? "" : $"Gunlocks releasing at {(Runtime.UpdateFrequency == UpdateFrequency.Update10 ? "14" : "5")}: {release}");
+                Echo($"{SystemStatus}");
+                if (!IsUnderControl && !GunsGO)
+                {
+                    release++;
+                }
+                counting++;
+                if (release > 14 && Runtime.UpdateFrequency == UpdateFrequency.Update10)
+                { UnlockTurret(); }
+                if (release > 5 && Runtime.UpdateFrequency == UpdateFrequency.Update100)
+                { UnlockTurret(); }
+                if (IsUnderControl || Ctrl.IsUnderControl)
+                {
+                    foreach (IMyTextPanel killscreen in _KillTrack)
+                    {
+                        float RoundedPivot = (float)Math.Round(GunPivotPiston.CurrentPosition, 2);
+                        float RoundedAzi = (float)Math.Round(GunAzimuthRotor.Angle, 2);
+                        killscreen.WriteText($"{(HasTarget ? $"Targets Engaged:\n{TarID}\n{TarID_relat}\nGun Position:\nEle: {RoundedPivot}\nAzi: {RoundedAzi}" : $"Gun Position:\nEle: {RoundedPivot}\nAzi: {RoundedAzi}")}\n");
+                    }
+                }
+            }
+            else
+            {
+                Echo("Program Terminated\n");
+                Me.GetSurface(0).WriteText($"Session\nComplete\n");
+                foreach (IMyTextPanel killtrackers in _KillTrack)
+                {
+                    float RoundedPivot = (float)Math.Round(GunPivotPiston.CurrentPosition, 2);
+                    float RoundedAzi = (float)Math.Round(GunAzimuthRotor.Angle, 2);
+                    killtrackers.WriteText($"Session\nComplete\n\nGun Position:\nEle: {RoundedPivot}\nAzi: {RoundedAzi}");
+                }
+                foreach (IMyLightingBlock lights in TurretLights)
+                {
+                    lights.Color = IsShooting ? turretstatus_engaged : HasTarget ? turretstatus_seeking : turretstatus_offline;
+                }
+                UnlockTurret();
+                GunPivotPiston.Velocity = GunPivotPistonStop;
+                GunAzimuthRotor.Enabled = true;
+                ASB.SelectedSound = "Objective complete";
+                ASB.Play();
+                shutdown = 0;
+                //                    TarGroupsGet = CTC.GetTargetingGroup().ToString();
+                Echo($"{TarGroupsGet}"); //                                DEBUGGING TARGETING GROUP SETS                                        
+                Runtime.UpdateFrequency = UpdateFrequency.None;
+            }
+        }
