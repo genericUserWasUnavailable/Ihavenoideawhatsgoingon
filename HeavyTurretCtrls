@@ -1,0 +1,300 @@
+/*
+ * R e a d m e
+ * -----------
+ * 
+ * In this file you can include any instructions or other comments you want to have injected onto the 
+ * top of your final script. You can safely delete this file if you do not want any such comments.
+ */
+
+int fireSafety = 0;
+int ramping = 0;
+int running = 0;
+int release = 0;
+bool fire = false;
+bool volleyFire = false;
+bool volleyFireRamp = false;
+bool debug = false;
+const string _ctc = "HeavyTurret_CTC";
+const string _ele = "HeavyTurret_Pivot_Hinge";
+const string _azi = "HeavyTurret_Azimuth_Rotor";
+const string _pivot = "HeavyTurret_Gun_Pivot";
+const string _cam = "HeavyTurret_Cam";
+string TarID = "";
+string CamID = "";
+IMyCameraBlock HTCam;
+IMyTurretControlBlock CTC;
+IMyMotorStator Ele;
+IMyMotorStator Azi;
+IMyPistonBase Piv;
+List<IMyUserControllableGun> _HeavyGuns = new List<IMyUserControllableGun>();
+List<IMyLandingGear> _HeavyTurretMagLock = new List<IMyLandingGear>();
+List<IMyGyro> _HeavyTurretGyros = new List<IMyGyro>();
+public Program()
+{
+    GetAll();
+}
+void GetAll()
+{
+    HTCam = GridTerminalSystem.GetBlockWithName(_cam) as IMyCameraBlock;
+    CTC = GridTerminalSystem.GetBlockWithName(_ctc) as IMyTurretControlBlock;
+    Ele = GridTerminalSystem.GetBlockWithName(_ele) as IMyMotorStator;
+    Azi = GridTerminalSystem.GetBlockWithName(_azi) as IMyMotorStator;
+    Piv = GridTerminalSystem.GetBlockWithName(_pivot) as IMyPistonBase;
+    GridTerminalSystem.GetBlocksOfType(_HeavyGuns, x => x.CustomName.StartsWith("HeavyTurret_"));
+    GridTerminalSystem.GetBlocksOfType(_HeavyTurretMagLock, x => x.CustomName.StartsWith("HeavyTurret_"));
+    GridTerminalSystem.GetBlocksOfType(_HeavyTurretGyros, x => x.CustomName.StartsWith("HeavyTurret_"));
+}
+public void Main(string argument, UpdateType updateSource)
+{
+    if (argument.Contains("3"))
+    {
+        debug = true;
+        if (argument == "33")
+        {
+            Volley();
+            Echo($"Debug: {debug}\n{_HeavyGuns.Count} guns found\n{_HeavyTurretGyros.Count} gyros found\n");
+        }
+        else { GetAll(); }
+    }
+    if (argument == "4")
+    { debug = !debug; }
+    if (!debug)
+    {
+        running++;
+        if (CTC.HasTarget && CTC.IsAimed)
+        {
+            release++;
+        }
+        if (running > 6)
+        {
+            running = 0;
+            if (release > 25)
+            {
+                release = 0;
+            }
+        }
+        Echo(running < 2 ? "." : running < 4 ? ".." : "...");
+        Echo($"{TarID}\n{CamID}\n{fire}\n{volleyFire}\nreleasing guns in: 100+: {release}");
+        Me.GetSurface(0).WriteText($"{TarID}\n{CamID}\n{fire}\n{volleyFire}\nreleasing guns:\n25+: {release}\n{CTC.GetTargetingGroup()}");
+        if (HTCam.Raycast(1400, 0f, 0f).Relationship != MyRelationsBetweenPlayerAndBlock.Enemies && !CTC.IsUnderControl && !CTC.IsAimed || _HeavyTurretMagLock.All(x => !x.IsLocked))
+        {
+            fire = false;
+        }
+        if (CTC.IsAimed && _HeavyGuns.Any(x=>!x.IsShooting) && !CTC.IsUnderControl && release > 20)
+        {
+            CycleTargetingGroups();
+        }
+        Runtime.UpdateFrequency = volleyFire || volleyFireRamp ? UpdateFrequency.Update1 : CTC.HasTarget || CTC.IsUnderControl || fire || !HTCam.Raycast(1400, 0f, 0f).IsEmpty() ? UpdateFrequency.Update10 : UpdateFrequency.Update100;
+        if (argument == "2")
+        {
+            CamID = HTCam.Raycast(1400, 0f, 0f).Relationship.ToString();
+            TarID = CTC.GetTargetedEntity().Relationship.ToString();
+        }
+        if (argument == "0")
+        {
+            volleyFire = false;
+            fire = false;
+            fireSafety = 0;
+
+            foreach (IMyGyro stabilizers in _HeavyTurretGyros)
+            {
+                stabilizers.GyroOverride = false;
+            }
+            foreach (IMyUserControllableGun gun in _HeavyGuns)
+            {
+                gun.Shoot = false;
+            }
+            foreach (IMyLandingGear maglocks in _HeavyTurretMagLock)
+            {
+                maglocks.Unlock();
+            }
+        }
+        if (argument == "1")
+        {
+
+            TarID = CTC.GetTargetedEntity().Relationship.ToString();
+            CamID = HTCam.Raycast(1400, 0, 0).Relationship.ToString();
+            fire = true;
+        }
+        if (!fire && !volleyFire)
+        {
+            PistonUpdateElevation();
+        }
+        if (Runtime.UpdateFrequency != UpdateFrequency.Update100 && Runtime.UpdateFrequency != UpdateFrequency.Once)
+        {
+            if (fire && (volleyFire || volleyFireRamp))
+            {
+                ramping++;
+                if (ramping > 13)
+                {
+                    ramping = 0;
+                    Lock();
+                }
+            }
+            else
+            {
+                if (CTC.HasTarget && !CTC.IsUnderControl && !CTC.IsAimed && HTCam.Raycast(1400, 0f, 0f).IsEmpty())
+                {
+                    fire = false;
+                    fireSafety = 0;
+                    foreach (IMyUserControllableGun gun in _HeavyGuns)
+                    {
+                        gun.Shoot = false;
+                    }
+                    if (_HeavyGuns.All(x => !x.IsShooting))
+                    {
+                        foreach (IMyGyro stabilizers in _HeavyTurretGyros)
+                        {
+                            stabilizers.GyroOverride = false;
+                        }
+                        if (_HeavyTurretMagLock.Any(x => x.IsLocked))
+                        {
+                            foreach (IMyLandingGear maglocks in _HeavyTurretMagLock)
+                            {
+                                maglocks.Unlock();
+                            }
+                        }
+                    }
+                }
+                if (fire)
+                {
+                    fireSafety++;
+                    Lock();
+                }
+            }
+        }
+        else
+        {
+            if (CamID == TarID && CTC.HasTarget)
+            {
+                Lock();
+            }
+            else
+            {
+                fire = false;
+                if (_HeavyGuns.All(x=>!x.IsShooting))
+                {
+                    foreach (IMyGyro stabilizers in _HeavyTurretGyros)
+                    {
+                        stabilizers.GyroOverride = false;
+                    }
+                    foreach (IMyLandingGear maglocks in _HeavyTurretMagLock)
+                    {
+                        maglocks.Unlock();
+                    }
+                }
+            }
+        }
+    }
+    if (CTC.GetTargetingGroup().Contains("ault"))
+    {
+        CTC.ApplyAction("TargetingGroup_CycleSubsystems");
+    }
+}
+void Lock()
+{
+    if (fireSafety > 4 && _HeavyTurretMagLock.Any(x => x.IsLocked))
+    {
+        Volley();
+    }
+    else
+    {
+        fireSafety++;
+        foreach (IMyGyro stabilizers in _HeavyTurretGyros.Where(x => x.GyroOverride == false))
+        {
+            stabilizers.GyroOverride = true;
+        }
+        foreach (IMyLandingGear maglocks in _HeavyTurretMagLock)
+        {
+            maglocks.Lock();
+        }
+    }
+}
+void PistonUpdateElevation()
+{
+    if (Ele.TargetVelocityRPM < 0f)
+    {
+        if (Piv.Velocity < 0)
+        {
+            Piv.Velocity = 0f;
+        }
+        else
+        {
+            Piv.Velocity += 0.015f;
+        }
+    }
+    else if (Ele.TargetVelocityRPM > 0f)
+    {
+        if (Piv.Velocity > 0)
+        {
+            Piv.Velocity = 0f;
+        }
+        else
+        {
+            Piv.Velocity += -0.015f;
+        }
+    }
+    else
+    {
+        Piv.Velocity = 0f;
+    }
+}
+void Volley()
+{
+    if (debug)
+    {
+        foreach (var maglocks in _HeavyTurretMagLock)
+        {
+            maglocks.Lock();
+        }
+        if (_HeavyTurretMagLock.Any(x => x.IsLocked))
+        {
+            _HeavyGuns.First(x => x.Shoot);
+        }
+    }
+    else
+    {
+        if (_HeavyGuns.All(x => x.IsShooting))
+        {
+            volleyFire = false;
+            volleyFireRamp = false;
+            foreach (IMyUserControllableGun gun in _HeavyGuns)
+            {
+                gun.Shoot = false;
+            }
+            foreach (IMyLandingGear maglocks in _HeavyTurretMagLock)
+            {
+                maglocks.Unlock();
+            }
+            foreach (IMyGyro stabilizers in _HeavyTurretGyros)
+            {
+                stabilizers.GyroOverride = false;
+            }
+        }
+        else
+        {
+            if ((CTC.IsUnderControl || CTC.IsAimed) && fire && CamID == TarID)
+            {
+                release = 0;
+            }
+            foreach (IMyUserControllableGun gun in _HeavyGuns.Where(x => !x.IsShooting))
+            {
+                gun.Shoot = true;
+                break;
+            }
+        }
+    }
+}
+void CycleTargetingGroups()
+{
+    if (CTC.GetTargetingGroup() == "PowerSystems")
+    {
+        CTC.SetTargetingGroup("Weapons");
+        release = 0;
+    }
+    else
+    {
+        CTC.ApplyAction("TargetingGroup_CycleSubsystems");
+        release = 0;
+    }
+}
