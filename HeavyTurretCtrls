@@ -76,7 +76,7 @@ public void Main(string argument, UpdateType updateSource)
         Echo(running < 2 ? "." : running < 4 ? ".." : "...");
         Echo($"{TarID}\n{CamID}\n{fire}\n{volleyFire}\nreleasing guns in: 100+: {release}");
         Me.GetSurface(0).WriteText($"{TarID}\n{CamID}\n{fire}\n{volleyFire}\nreleasing guns:\n25+: {release}\n{CTC.GetTargetingGroup()}");
-        if (HTCam.Raycast(1400, 0f, 0f).Relationship != MyRelationsBetweenPlayerAndBlock.Enemies && !CTC.IsUnderControl && !CTC.IsAimed || _HeavyTurretMagLock.All(x => !x.IsLocked))
+        if (HTCam.Raycast(1400, 0f, 0f).Relationship != MyRelationsBetweenPlayerAndBlock.Enemies && !CTC.IsUnderControl && !CTC.IsAimed || _HeavyTurretMagLock.All(x => !x.IsLocked && x.Enabled))
         {
             fire = false;
         }
@@ -104,7 +104,7 @@ public void Main(string argument, UpdateType updateSource)
             {
                 gun.Shoot = false;
             }
-            foreach (IMyLandingGear maglocks in _HeavyTurretMagLock)
+            foreach (IMyLandingGear maglocks in _HeavyTurretMagLock.Where(x => x.Enabled))
             {
                 maglocks.Unlock();
             }
@@ -149,7 +149,7 @@ public void Main(string argument, UpdateType updateSource)
                         }
                         if (_HeavyTurretMagLock.Any(x => x.IsLocked))
                         {
-                            foreach (IMyLandingGear maglocks in _HeavyTurretMagLock)
+                            foreach (IMyLandingGear maglocks in _HeavyTurretMagLock.Where(x => x.Enabled))
                             {
                                 maglocks.Unlock();
                             }
@@ -178,7 +178,7 @@ public void Main(string argument, UpdateType updateSource)
                     {
                         stabilizers.GyroOverride = false;
                     }
-                    foreach (IMyLandingGear maglocks in _HeavyTurretMagLock)
+                    foreach (IMyLandingGear maglocks in _HeavyTurretMagLock.Where(x=>x.Enabled))
                     {
                         maglocks.Unlock();
                     }
@@ -193,7 +193,7 @@ public void Main(string argument, UpdateType updateSource)
 }
 void Lock()
 {
-    if (fireSafety > 4 && _HeavyTurretMagLock.Any(x => x.IsLocked))
+    if (fireSafety > 4 && _HeavyTurretMagLock.Any(x => x.IsLocked || !x.Enabled))
     {
         Volley();
     }
@@ -204,7 +204,7 @@ void Lock()
         {
             stabilizers.GyroOverride = true;
         }
-        foreach (IMyLandingGear maglocks in _HeavyTurretMagLock)
+        foreach (IMyLandingGear maglocks in _HeavyTurretMagLock.Where(x=>x.Enabled))
         {
             maglocks.Lock();
         }
@@ -262,7 +262,7 @@ void Volley()
             {
                 gun.Shoot = false;
             }
-            foreach (IMyLandingGear maglocks in _HeavyTurretMagLock)
+            foreach (IMyLandingGear maglocks in _HeavyTurretMagLock.Where(x => x.Enabled))
             {
                 maglocks.Unlock();
             }
