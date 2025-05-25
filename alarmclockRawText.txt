@@ -1,0 +1,524 @@
+using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
+using System.Diagnostics;
+using System.Net;
+using NAudio.CoreAudioApi;
+using NAudio.Wave;
+using System.Threading;
+using System;
+using System.Threading.Tasks;
+using Microsoft.Win32.TaskScheduler;
+using SchedTask = Microsoft.Win32.TaskScheduler.Task;
+using Task = System.Threading.Tasks.Task;
+using System.Text;
+using System.Text.Json;
+using System.Reflection;
+using System.Text.Json.Serialization;
+
+namespace NewAlarmClock
+{
+    public class AppConfig
+    {
+        public int LastSongIndex { get; set; } = 0;
+        public List<int> RecentSongIndices { get; set; } = new List<int>();
+        public float LastVolume { get; set; } = 0.15f;
+
+        // Safe directory resolution (no trailing slash)
+        private static readonly string ConfigFolder =
+            AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
+
+        // Explicit config filename
+        public static string ConfigPath { get; private set; } =
+            Path.Combine(ConfigFolder, "NewAlarmClock_config.json"); // Fixed typo in "Alarm"
+
+        public void Save()
+        {
+            try
+            {
+                // No need for Directory.CreateDirectory() since AppContext.BaseDirectory always exists
+                File.WriteAllText(ConfigPath,
+                    JsonSerializer.Serialize(this, new JsonSerializerOptions
+                    {
+                        WriteIndented = true,
+                        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull // Optional cleanup
+                    }));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Config save failed: {ex.Message}");
+                // Consider adding retry logic here if needed
+            }
+        }
+
+        public static AppConfig Load()
+        {
+            try
+            {
+                if (File.Exists(ConfigPath))
+                {
+                    string json = File.ReadAllText(ConfigPath);
+                    return JsonSerializer.Deserialize<AppConfig>(json) ?? new AppConfig();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Config load failed: {ex.Message}");
+                // Consider creating emergency backup of corrupted config
+            }
+            return new AppConfig();
+        }
+    }
+
+    internal class Program
+    {
+        private static AppConfig config = AppConfig.Load();
+        static
+             Stopwatch
+             swUntilAlarmGoesPOW = new Stopwatch();
+
+        private
+            const
+             string
+             SetupMessage = "\rSet the time for alarm\n\rusing hh:mm format\n",
+             Neuro = @"https://www.youtube.com/watch?v=ZyG0y2GYU30",             
+             MainMessage = "\nPress Ctrl-C to {0}\nPress Ctrl-Brk to end\n\n",
+             TimerMessage = "\rAlarm going off in: {0}";
+
+        private
+          static
+           readonly
+            string
+            operaGX = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Programs\Opera GX\opera.exe"),
+            folderPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+
+
+        private
+            static
+                List<string>
+                    availableSongs = new List<string>(); // Declare a hash set to store the paths of available songs
+        private
+            static
+            StringBuilder sb = new StringBuilder();
+
+        static
+            TimeSpan
+            parseTimePart = TimeSpan.Zero,
+            durationUntilAlarmTimeSpan = TimeSpan.Zero,
+            songDuration = TimeSpan.Zero;
+
+        static async void KeyPressHandler(object sender, ConsoleCancelEventArgs e)
+        {
+            if (e.SpecialKey == ConsoleSpecialKey.ControlC)
+            {
+                if (swUntilAlarmGoesPOW.IsRunning)
+                    swUntilAlarmGoesPOW.Stop();
+                else
+                    swUntilAlarmGoesPOW.Start();
+
+                await ClearConsoleAndDisplayInfo(true);
+            }
+            else if (e.SpecialKey == ConsoleSpecialKey.ControlBreak)
+            {
+                Process.Start("shutdown.exe", "-a");
+                config.Save();
+                Environment.Exit(0);
+            }
+            e.Cancel = true;
+        }
+        static async Task UpdateTaskScheduler(DateTime? input = null, string? inputString = null)
+        {
+            if (input == null)
+            {
+                return;
+            }
+
+            using TaskService ts = new TaskService();
+            SchedTask task = ts.GetTask(@"\Reminder active");
+            if (task != null)
+            {
+                foreach (Trigger trigger in task.Definition.Triggers)
+                {
+                    if (trigger is TimeTrigger timedTrigger)
+                    {
+                        if (!string.IsNullOrEmpty(inputString))
+                        {
+                            task.Definition.RegistrationInfo.Description = inputString.Trim();
+                        }
+                        timedTrigger.StartBoundary = (DateTime)input;
+                        ts.RootFolder.RegisterTaskDefinition(@"\Reminder active", task.Definition); // testing */
+
+                        Console.WriteLine($"\rTask '{task.Name}' has been updated to start at {input}");
+                        Console.WriteLine($"\r\'{inputString}\' set as wakeup-message\n\rHit any key to proceed.");
+                        Console.ReadKey();
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                Console.Clear();
+                Console.WriteLine("The task 'Reminder active' was not found. Please ensure it exists.");
+            }
+        }
+        static async Task SetScreenToSingleScreen()
+        {
+            ProcessStartInfo psiDisplay = new ProcessStartInfo();
+            psiDisplay.FileName = "DISPLAYSWITCH.exe";
+            psiDisplay.Arguments = "1";
+            psiDisplay.UseShellExecute = true;
+
+            Process pDisplay = Process.Start(psiDisplay);
+            pDisplay.WaitForExit();
+            await Task.Delay(7000);
+        }
+        static string FetchTaskSchedulerMessage()
+        {
+            using TaskService ts = new TaskService();
+            SchedTask task = ts.GetTask(@"\Reminder active");
+            if (task != null)
+            {
+                return task.Definition.RegistrationInfo.Description;
+            }
+
+            return string.Empty;
+        }
+        static void OpenNeuro()
+        {
+            ProcessStartInfo neuroNeuro = new ProcessStartInfo();
+            neuroNeuro.FileName = $"\"{operaGX}\"";
+            neuroNeuro.Arguments = $"\"{Neuro}\"";
+            neuroNeuro.UseShellExecute = true;
+
+            Process evilEvil = Process.Start(neuroNeuro);
+            evilEvil.WaitForExit(3000);
+        }
+        static async Task Main(string[] args)
+        {
+            bool firstRun = true,
+                 autorunActive = true,
+                 immediateRun = false;
+
+            var config = AppConfig.Load();
+
+            Console.CancelKeyPress += new ConsoleCancelEventHandler(KeyPressHandler);
+
+
+            immediateRun = args.Any(x => x.IndexOf("autorun", StringComparison.OrdinalIgnoreCase) != -1);
+
+            string fetchedWakeupMsg = string.Empty;
+
+            if (immediateRun)
+            {
+                int retryAttempts = 4;
+                await SetScreenToSingleScreen();
+                fetchedWakeupMsg = FetchTaskSchedulerMessage();
+            }
+
+
+            MMDeviceEnumerator enumerator = new();
+            MMDevice device = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Console);
+            device.AudioEndpointVolume.MasterVolumeLevelScalar = config.LastVolume;
+
+            await InitializeAvailableSongs();
+
+            using (Mutex mutex = new Mutex(true, "newAlarmClock", out firstRun))
+            {
+                while (immediateRun)
+                {
+                    if (autorunActive)
+                    {
+                        Task.Run(() => RunNormalProcedure(device, fetchedWakeupMsg));
+                        autorunActive = false;
+                        OpenNeuro();
+                        await Task.Delay(2000);
+                    }
+                    device.AudioEndpointVolume.MasterVolumeLevelScalar =
+                    Math.Min(device.AudioEndpointVolume.MasterVolumeLevelScalar + 0.01f, 1.0f);
+                    await Task.Delay(500);
+                }
+                try
+                {
+                    if (!firstRun)
+                    {
+                        OpenNeuro();
+                        config.Save();
+                        Environment.Exit(0);
+                    }//*/
+
+                    Console.Clear();
+
+                    Console.Write(SetupMessage);
+
+                    await SetTimeFunctionality();
+
+                    Console.Clear();
+
+                    swUntilAlarmGoesPOW.Start();
+
+                    await ClearConsoleAndDisplayInfo(true);
+
+                    while (swUntilAlarmGoesPOW.Elapsed.TotalSeconds < durationUntilAlarmTimeSpan.TotalSeconds)
+                    {
+                        if (swUntilAlarmGoesPOW.IsRunning)
+                        {
+                            await ClearConsoleAndDisplayInfo(false);
+                            await Task.Delay(1100);
+                        }
+                        else
+                        {
+                            await ClearConsoleAndDisplayInfo(true);
+                            await Task.Delay(8000);
+                        }
+                    }
+                ResetToHere:
+                    device.AudioEndpointVolume.MasterVolumeLevelScalar = .1f;
+                    Task.Run(() => MuteChecker(device));
+
+                    await Task.Run(() => RunNormalProcedure(device, fetchedWakeupMsg));
+
+                    OpenNeuro();
+
+                    while (swUntilAlarmGoesPOW.IsRunning)
+                    {
+                        if (swUntilAlarmGoesPOW.Elapsed > parseTimePart)
+                        {
+                            while (availableSongs.Count > 0)
+                                goto ResetToHere;
+                            swUntilAlarmGoesPOW.Stop();
+                        }
+                        device.AudioEndpointVolume.MasterVolumeLevelScalar += .01f;
+                        await Task.Delay(500);
+                    }
+                }
+                finally
+                {
+                    config.Save();
+                    mutex.ReleaseMutex();
+                    mutex.Dispose();
+                }
+            }
+        }
+        private static async Task SetTimeFunctionality()
+        {
+            Stopwatch stopwatch = Stopwatch.StartNew();
+            TimeSpan endTime = TimeSpan.FromSeconds(2);
+
+            string? parseArgumentWakeUpMessage;
+            DateTime updateScheduler = GetAlarmTime(Console.ReadLine());
+            if (updateScheduler <= DateTime.Now)
+            {
+                updateScheduler = DateTime.Now.AddMinutes(1);
+            }
+            durationUntilAlarmTimeSpan = updateScheduler - DateTime.Now;
+            Console.Clear();
+            Console.Write("\rWrite\n wakeup-message:\n\r");
+            parseArgumentWakeUpMessage = Console.ReadLine();
+            UpdateTaskScheduler(updateScheduler, parseArgumentWakeUpMessage).Wait(500);
+            var schedulerTask = UpdateTaskScheduler(updateScheduler, parseArgumentWakeUpMessage);
+            var timeout = Stopwatch.StartNew();
+
+            while (!schedulerTask.IsCompleted && timeout.Elapsed.TotalSeconds < 5)
+            {
+                await Task.Delay(100); // Cooperative waiting
+            }
+
+            // 2. Nuclear-proof config save
+            int retries = 3;
+            while (retries-- > 0)
+            {
+                try
+                {
+                    config.Save();
+
+                    var fileInfo = new FileInfo(AppConfig.ConfigPath);
+                    if (fileInfo.Exists && fileInfo.Length > 10)
+                    {
+                        break; 
+                    }
+                }
+                catch { /* Intentionally swallow errors during retry */ }
+            }
+
+            // 3. Guaranteed exit
+            for (int i = 0; i < 5; i++)
+            {
+                try
+                {
+                    Environment.Exit(0);
+                    break; // In case Exit somehow fails
+                }
+                catch { /* Try again */ }
+            }
+
+            // Final fallback (should never reach here)
+            Process.GetCurrentProcess().Kill();
+        }
+
+        private static async Task ClearConsoleAndDisplayInfo(bool clear)
+        {
+            if (clear)
+            {
+                Console.Clear();
+                sb.Clear();
+                // string writeThis = "";
+                sb.AppendLine(string.Format(TimerMessage, !swUntilAlarmGoesPOW.IsRunning ? "PAUSED" : "ACTIVE"));
+                sb.AppendLine(string.Format(MainMessage, !swUntilAlarmGoesPOW.IsRunning ? "CONTINUE" : "PAUSE"));
+                sb.AppendLine($"\r{FormatTimeRemaining()}");
+                Console.Write(sb.ToString());
+                return;
+            }
+
+            Console.Write($"\r{FormatTimeRemaining()}");
+        }
+        static string FormatTimeRemaining()
+        {
+            return $"\r{(durationUntilAlarmTimeSpan - swUntilAlarmGoesPOW.Elapsed).ToString("hh\\:mm\\:ss") + " remaining"}";
+        }
+        static DateTime GetAlarmTime(string inputDateTime)
+        {
+            if (string.IsNullOrEmpty(inputDateTime))
+            {
+                return DateTime.Now.AddSeconds(1);
+            }
+
+            TimeSpan alarmTimeSpan;
+            string inputTime;
+
+            while (true)
+            {
+                inputTime = Regex.Replace(inputDateTime.Trim(), @"[,\.\-;:_\s]+", ":");
+
+                if (string.IsNullOrEmpty(inputTime))
+                {
+                    continue;
+                }
+
+                if (TimeSpan.TryParse(inputTime, out alarmTimeSpan))
+                {
+                    break;
+                }
+                else
+                {
+                    Console.Write("\rInvalid time format. Please enter a time in the format H:mm.");
+                }
+            }
+            return IncreaseShutdownDateTimeTomorrow(inputTime);
+        }
+        static DateTime IncreaseShutdownDateTimeTomorrow(string inputTime)
+        {
+            // If the input is not in the correct format, use the default time
+            if (!TimeSpan.TryParse(inputTime, out TimeSpan alarmTime))
+            {
+                alarmTime = TimeSpan.Parse("8:00");
+                Console.Clear();
+                Console.WriteLine("\rDefaulting to 8:00 because you \n\rmanaged to ruin everything! Now hit a key or something!\n");
+                Console.ReadKey();
+                config.Save();
+                Environment.Exit(0);
+            }
+
+            // Get the current date and time
+            DateTime now = DateTime.Now;
+
+            // Create a DateTime object for the next occurrence of the input time
+            DateTime nextAlarm = now.Date + alarmTime;
+
+            // If the next alarm time is in the past, add one day to it
+            while (nextAlarm < now)
+            {
+                nextAlarm = nextAlarm.AddDays(1);
+            }
+            return nextAlarm;
+        }        
+        static async Task RunNormalProcedure(MMDevice inputMediaplayer, string? inputString = null)
+        {
+            if (availableSongs.Count == 0)
+            {
+                Console.WriteLine("No available songs found. InitializeAvailableSongs() must run first.");
+                return;
+            }
+            Random random = new Random(); // FIXED: no seed
+            int randomInt = random.Next(availableSongs.Count); // cleaner
+
+            await Task.Delay(400);
+
+            string randomMp3File = availableSongs[randomInt].ToString().Trim();
+
+            Console.Clear();
+            try
+            {
+                // Read the duration of the MP3 file
+                using var mp3FileReader = new Mp3FileReader(randomMp3File);
+                await Task.Delay(200);
+                songDuration = mp3FileReader.TotalTime;
+                await Task.Delay(400);
+
+                Console.WriteLine($"\r{randomMp3File}\n\rDuration: {songDuration.ToString(@"mm\:ss")}\n");
+
+                // Start the process and wait for it to exit
+                Process process = Process.Start(new ProcessStartInfo(@"C:\Program Files (x86)\Windows Media Player\Wmplayer.exe", $"\"{randomMp3File}\"") { UseShellExecute = true });
+
+                string displayMessage = !string.IsNullOrEmpty(inputString?.Trim()) ? inputString.Trim() : "You set this for a reason!";
+                Console.Write($"\r{displayMessage}");
+                parseTimePart = songDuration;
+                await UpdateTaskScheduler(DateTime.Now + songDuration, null);
+                swUntilAlarmGoesPOW.Restart();
+                return;
+            }
+            catch (Exception ex)
+            {
+                Console.Write($"\rError in GetMP3 method: {ex.Message}");
+            }
+        }
+        static async Task MuteChecker(MMDevice input)
+        {
+            while (true)
+            {
+                if (input.AudioEndpointVolume.Mute)
+                {
+                    input.AudioEndpointVolume.Mute = false;
+                }
+                await Task.Delay(8000);
+            }
+        }
+        static async Task InitializeAvailableSongs()
+        {
+            availableSongs.Clear();
+
+            if (string.IsNullOrEmpty(folderPath) || !Directory.Exists(folderPath))
+            {
+                Console.WriteLine("Error: folderPath is invalid or does not exist.");
+                return;
+            }
+
+            string[] mp3Files;
+            try
+            {
+                mp3Files = Directory.GetFiles(folderPath, "*.mp3");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error accessing folder: {ex.Message}");
+                return;
+            }
+
+            foreach (string mp3File in mp3Files)
+            {
+                if (!mp3File.Contains("asf", StringComparison.OrdinalIgnoreCase))
+                {
+                    availableSongs.Add(mp3File);
+                }
+            }
+
+            if (availableSongs.Count == 0)
+            {
+                Console.WriteLine("Warning: No songs passed the filter criteria.");
+            }
+
+            foreach (var song in availableSongs)
+            {
+                Console.WriteLine(song);
+            }
+        }
+    }
+}
